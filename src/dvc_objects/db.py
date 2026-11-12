@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from fsspec import Callback
 
     from .fs.base import AnyFSPath, FileSystem
+    from .membership import MembershipIndex
 
 
 logger = logging.getLogger(__name__)
@@ -38,10 +39,20 @@ def wrap_iter(iterable, callback):
 
 
 class ObjectDB:
-    def __init__(self, fs: "FileSystem", path: str, read_only: bool = False, **config):
+    def __init__(
+        self,
+        fs: "FileSystem",
+        path: str,
+        read_only: bool = False,
+        membership_index: "Optional[MembershipIndex]" = None,
+        **config,
+    ):
         self.fs = fs
         self.path = path
         self.read_only = read_only
+        # Optional accelerative layer only; ``None`` preserves the original
+        # ObjectDB behaviour and on-disk format exactly.
+        self.membership_index = membership_index
         self._dirs: Optional[set] = None
 
     def __eq__(self, other: object):
@@ -64,6 +75,53 @@ class ObjectDB:
         yield "fs", self.fs
         yield "path", self.path
         yield "read_only", self.read_only, False
+
+    def _membership_notify_add(self, oids) -> None:
+        index = self.membership_index
+        if index is None:
+            return
+        try:
+            index.add_oids(oids)
+        except Exception:
+            # The index is best-effort: never let acceleration break adds.
+            logger.debug(
+                "membership index add notification failed, index will fall back",
+                exc_info=True,
+            )
+            with suppress(Exception):
+                index.invalidate("add notification failed")
+
+    def _membership_notify_delete(self, oid: str) -> None:
+        index = self.membership_index
+        if index is None:
+            return
+        try:
+            index.on_delete(oid)
+        except Exception:
+            logger.debug(
+                "membership index delete notification failed",
+                exc_info=True,
+            )
+
+    def _membership_partition(self, oids: set) -> set:
+        """Return the oids that still need a real ObjectDB query.
+
+        Oids proven absent by the membership index are dropped here; every
+        probabilistic hit stays in the returned set and is confirmed by the
+        unaccelerated query path.
+        """
+        index = self.membership_index
+        if index is None:
+            return oids
+        try:
+            _negative, uncertain = index.check(oids)
+        except Exception:
+            logger.debug(
+                "membership index check failed, using plain query path",
+                exc_info=True,
+            )
+            return oids
+        return uncertain
 
     def _init(self, dname: str) -> None:
         if self.read_only:
@@ -133,6 +191,8 @@ class ObjectDB:
 
         path = self.oid_to_path(oid)
         self.fs.put_file(fobj, path, size=size)
+        # Publish the object first; only then tell the index about it.
+        self._membership_notify_add([oid])
 
     def add(
         self,
@@ -194,10 +254,17 @@ class ObjectDB:
             batch_size=jobs,
             on_error=_on_error if on_error is not None else None,
         )
+        # Objects are published before the index learns about them.  A
+        # failed transfer can at worst leave a probabilistic extra bit,
+        # never a false negative.
+        self._membership_notify_add(list(to_oids))
         return len(to_add) - failed
 
     def delete(self, oid: str):
         self.fs.remove(self.oid_to_path(oid))
+        # Shared Bloom bits are intentionally left untouched: a delete can
+        # only add false positives (filtered by real queries) until rebuild.
+        self._membership_notify_delete(oid)
 
     def clear(self):
         for oid in self.all():
@@ -390,11 +457,15 @@ class ObjectDB:
 
         Which method to use will be automatically determined after estimating
         the size of the remote cache, and comparing the estimated size with
-        len(oids). To estimate the size of the remote cache, we fetch
-        a small subset of cache entries (i.e. entries starting with "00...").
+        len(oids). To estimate the size of the remote cache, we fetch a
+        small subset of cache entries (i.e. entries starting with "00...").
         Based on the number of entries in that subset, the size of the full
         cache can be estimated, since the cache is evenly distributed according
         to oid.
+
+        If an optional membership index is attached, oids that the index
+        proves absent never reach the remote at all; every probabilistic
+        index hit is still confirmed by one of the two methods above.
 
         Takes a callback that returns value in the format of:
         (phase, total, current). The phase can be {"estimating, "querying"}.
@@ -402,6 +473,13 @@ class ObjectDB:
         Returns:
             A list with oids that were found in the remote
         """
+        oids = set(oids)
+        uncertain = self._membership_partition(oids)
+        if not uncertain:
+            return []
+        return self._oids_exist_impl(uncertain, jobs=jobs, progress=progress)
+
+    def _oids_exist_impl(self, oids, jobs=None, progress=noop):
         # Remotes which do not use traverse prefix should override
         # oids_exist() (see ssh, local)
         assert self.fs.TRAVERSE_PREFIX_LEN >= 2
