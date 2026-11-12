@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from . import generic  # noqa: F401
 from .local import LocalFileSystem, localfs  # noqa: F401
 from .memory import MemoryFileSystem  # noqa: F401
+from .plan import PlanOverlappingTransfer  # noqa: F401
 from .scheme import Schemes
 
 if TYPE_CHECKING:
