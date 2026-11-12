@@ -4,8 +4,11 @@ import shutil
 
 import fsspec
 
+from dvc_objects.compat import cached_property
+
 from . import system
 from .base import FileSystem
+from .conditional import LocalConditionalWriter
 from .utils import copyfile, makedirs, move, remove, tmp_fname
 
 logger = logging.getLogger(__name__)
@@ -184,6 +187,11 @@ class LocalFileSystem(FileSystem):
     def __init__(self, fs=None, **kwargs):
         fs = fs or FsspecLocalFileSystem(**kwargs)
         super().__init__(fs, **kwargs)
+
+    @cached_property
+    def conditional_writer(self) -> LocalConditionalWriter:
+        """Atomic conditional-write capability declared for local disks."""
+        return LocalConditionalWriter()
 
     def getcwd(self):
         return os.getcwd()
