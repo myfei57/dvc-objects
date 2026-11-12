@@ -72,6 +72,11 @@ class FileSystem:
     TRAVERSE_PREFIX_LEN = 2
     TRAVERSE_THRESHOLD_SIZE = 500000
     CAN_TRAVERSE = True
+    # Whether moving a file inside this filesystem exposes a finished object
+    # atomically (a reader only ever sees the missing or the complete file).
+    # Filesystems which cannot promise this must explicitly opt out so that
+    # transfer sessions can reject strict mode or record a degraded result.
+    CAN_ATOMIC_PUBLISH: ClassVar[bool] = False
 
     PARAM_CHECKSUM: ClassVar[Optional[str]] = None
 

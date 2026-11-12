@@ -180,6 +180,8 @@ class LocalFileSystem(FileSystem):
     PARAM_CHECKSUM = "md5"
     PARAM_PATH = "path"
     TRAVERSE_PREFIX_LEN = 2
+    # Same-directory os.replace/os.rename makes tmp -> final publishing atomic.
+    CAN_ATOMIC_PUBLISH = True
 
     def __init__(self, fs=None, **kwargs):
         fs = fs or FsspecLocalFileSystem(**kwargs)

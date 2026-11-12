@@ -4,6 +4,9 @@ from .base import FileSystem
 class MemoryFileSystem(FileSystem):
     protocol = "memory"
     PARAM_CHECKSUM = "md5"
+    # The in-memory store is mutated through single, GIL-protected dictionary
+    # operations, so publishing a tmp entry never exposes partial content.
+    CAN_ATOMIC_PUBLISH = True
 
     def __init__(self, global_store=True, fs=None, **kwargs):
         super().__init__(fs=fs, **kwargs)
